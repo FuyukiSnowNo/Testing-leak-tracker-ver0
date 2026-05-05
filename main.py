@@ -1,128 +1,85 @@
-#!/usr/bin/env python3
-"""
-main.py — Sneaker Leak Tracker CLI
+# main.py  -  Sneaker Leak Monitor CLI
+# Usage:
+#   python main.py scan              # run once now
+#   python main.py schedule          # run every hour automatically
+#   python main.py matches           # show all matches found so far
+#   python main.py ig-login          # save Instagram session
+#   python main.py make-template     # create blank Excel sample template
 
-Usage:
-  python main.py scan
-  python main.py scan --from 2025-01-01 --to 2025-04-21
-  python main.py schedule --interval 6
-  python main.py stats --from 2025-01-01
-  python main.py export --format csv
-  python main.py export --format json --output exports/leaks.json
-"""
-
-import argparse
-import logging
 import sys
-from datetime import datetime, timezone
-
-from rich.console import Console
-
+import logging
 import config
-from database.db import Database
 
-console = Console()
-
-
-def parse_date(s: str) -> datetime:
-    try:
-        dt = datetime.strptime(s, "%Y-%m-%d")
-        return dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        console.print(f"[red]Invalid date '{s}'. Use YYYY-MM-DD format.[/red]")
-        sys.exit(1)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(config.SCAN_LOG, encoding="utf-8"),
+    ]
+)
 
 
-def cmd_scan(args):
+def cmd_scan():
     from scheduler.runner import run_scan
-    db    = Database()
-    since = parse_date(args.since) if args.since else None
-    until = parse_date(args.until) if args.until else None
-    run_scan(db, since=since, download_images=not args.no_images)
+    run_scan()
 
 
-def cmd_schedule(args):
+def cmd_schedule():
     from scheduler.runner import start_scheduler
-    db       = Database()
-    interval = args.interval or config.DEFAULT_INTERVAL_HOURS
-    start_scheduler(db, interval_hours=interval)
+    start_scheduler()
 
 
-def cmd_stats(args):
-    from stats.analyzer import print_report
-    db    = Database()
-    since = parse_date(args.since) if args.since else None
-    until = parse_date(args.until) if args.until else None
-    print_report(db, since=since, until=until)
+def cmd_matches():
+    from database.db import DB
+    db = DB()
+    matches = db.get_matches(limit=50)
+    if not matches:
+        print("No matches found yet. Run: python main.py scan")
+        return
+    print("
+" + str(len(matches)) + " matches found:
+")
+    for m in matches:
+        print("  [" + m["sample_season"] + "] " + m["sample_model_name"] + " (" + m["sample_model_code"] + ")")
+        print("  Source: " + m["source"])
+        print("  Title:  " + m["title"])
+        print("  URL:    " + m["url"])
+        print("  Found:  " + m["notified_at"])
+        print()
 
 
-def cmd_weekly(args):
-    """Run Instagram + Google for last 7 days, right now."""
-    from scheduler.runner import run_weekly_scan
-    db = Database()
-    run_weekly_scan(db)
+def cmd_ig_login():
+    username = input("Instagram username: ").strip()
+    password = input("Instagram password: ").strip()
+    try:
+        import instaloader
+        L = instaloader.Instaloader()
+        L.login(username, password)
+        L.save_session_to_file("ig_session")
+        print("Session saved to ig_session")
+    except Exception as e:
+        print("Login failed: " + str(e))
 
 
-def cmd_export(args):
-    from exports.exporter import export
-    db    = Database()
-    since = parse_date(args.since) if args.since else None
-    until = parse_date(args.until) if args.until else None
-    export(db, fmt=args.format, output=args.output, since=since, until=until)
+def cmd_make_template():
+    from samples.loader import create_template
+    create_template("samples_template.xlsx")
 
 
-def main():
-    logging.basicConfig(
-        level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-    parser = argparse.ArgumentParser(
-        prog="sneaker-leak-tracker",
-        description="Automated sneaker leak scraper & stats tracker",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # ── scan ─────────────────────────────────────────────────────────────
-    p_scan = sub.add_parser("scan", help="Run a one-time scrape")
-    p_scan.add_argument("--from", dest="since", metavar="YYYY-MM-DD",
-                        help="Only fetch articles published after this date")
-    p_scan.add_argument("--no-images", dest="no_images", action="store_true", help="Skip image downloading")
-    p_scan.add_argument("--to",   dest="until", metavar="YYYY-MM-DD",
-                        help="Only fetch articles published before this date")
-
-    # ── weekly ────────────────────────────────────────────────────────────
-    sub.add_parser("weekly", help="Run Instagram + Google scan for last 7 days (now)")
-
-    # ── schedule ─────────────────────────────────────────────────────────
-    p_sched = sub.add_parser("schedule", help="Run on a repeating schedule")
-    p_sched.add_argument("--interval", type=int, metavar="HOURS",
-                         help=f"Scrape every N hours (default: {config.DEFAULT_INTERVAL_HOURS})")
-
-    # ── stats ─────────────────────────────────────────────────────────────
-    p_stats = sub.add_parser("stats", help="Print stats report")
-    p_stats.add_argument("--from", dest="since", metavar="YYYY-MM-DD")
-    p_stats.add_argument("--to",   dest="until", metavar="YYYY-MM-DD")
-
-    # ── export ────────────────────────────────────────────────────────────
-    p_exp = sub.add_parser("export", help="Export data to CSV or JSON")
-    p_exp.add_argument("--format", choices=["csv", "json"], default="csv")
-    p_exp.add_argument("--output", metavar="PATH",
-                       help="Output file path (default: exports/leaks_TIMESTAMP.csv)")
-    p_exp.add_argument("--from", dest="since", metavar="YYYY-MM-DD")
-    p_exp.add_argument("--to",   dest="until", metavar="YYYY-MM-DD")
-
-    args = parser.parse_args()
-
-    dispatch = {
-        "scan":     cmd_scan,
-        "weekly":   cmd_weekly,
-        "schedule": cmd_schedule,
-        "stats":    cmd_stats,
-        "export":   cmd_export,
-    }
-    dispatch[args.command](args)
-
+commands = {
+    "scan":          cmd_scan,
+    "schedule":      cmd_schedule,
+    "matches":       cmd_matches,
+    "ig-login":      cmd_ig_login,
+    "make-template": cmd_make_template,
+}
 
 if __name__ == "__main__":
-    main()
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd in commands:
+        commands[cmd]()
+    else:
+        print("Commands:")
+        for k in commands:
+            print("  python main.py " + k)
